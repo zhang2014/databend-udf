@@ -29,6 +29,8 @@ ARROW_EXT_TYPE_VARIANT = b"Variant"
 
 TIMESTAMP_UINT = "us"
 
+executor = ThreadPoolExecutor(max_workers=128)
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,14 +64,14 @@ class ScalarFunction(UserDefinedFunction):
     _batch_mode: bool
 
     def __init__(
-        self,
-        func,
-        input_types,
-        result_type,
-        name=None,
-        io_threads=None,
-        skip_null=None,
-        batch_mode=False,
+            self,
+            func,
+            input_types,
+            result_type,
+            name=None,
+            io_threads=None,
+            skip_null=None,
+            batch_mode=False,
     ):
         self._func = func
         self._input_schema = pa.schema(
@@ -147,12 +149,12 @@ class ScalarFunction(UserDefinedFunction):
 
 
 def udf(
-    input_types: Union[List[Union[str, pa.DataType]], Union[str, pa.DataType]],
-    result_type: Union[str, pa.DataType],
-    name: Optional[str] = None,
-    io_threads: Optional[int] = 32,
-    skip_null: Optional[bool] = False,
-    batch_mode: Optional[bool] = False,
+        input_types: Union[List[Union[str, pa.DataType]], Union[str, pa.DataType]],
+        result_type: Union[str, pa.DataType],
+        name: Optional[str] = None,
+        io_threads: Optional[int] = 32,
+        skip_null: Optional[bool] = False,
+        batch_mode: Optional[bool] = False,
 ) -> Callable:
     """
     Annotation for creating a user-defined scalar function.
@@ -214,6 +216,17 @@ def udf(
         )
 
 
+def do_exchange_impl(udf, reader, writer):
+    writer.begin(udf._result_schema)
+    try:
+        for batch in reader:
+            for output_batch in udf.eval_batch(batch.data):
+                writer.write_batch(output_batch)
+    except Exception as e:
+        logger.exception(e)
+        raise e
+
+
 class UDFServer(FlightServerBase):
     """
     A server that provides user-defined functions to clients.
@@ -256,14 +269,7 @@ class UDFServer(FlightServerBase):
         if func_name not in self._functions:
             raise ValueError(f"Function {func_name} does not exists")
         udf = self._functions[func_name]
-        writer.begin(udf._result_schema)
-        try:
-            for batch in reader:
-                for output_batch in udf.eval_batch(batch.data):
-                    writer.write_batch(output_batch)
-        except Exception as e:
-            logger.exception(e)
-            raise e
+        executor.submit(do_exchange_impl, udf, reader, writer)
 
     def add_function(self, udf: UserDefinedFunction):
         """Add a function to the server."""
